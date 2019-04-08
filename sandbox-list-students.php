@@ -6,46 +6,49 @@
 //   those to extract StudentSpecialEducationAssociations from the ADVISER ODS.
 //
 //  10/30/2018 SI
+//
+// sandbox-list-students.php
+//  List student IDs with specialEducationProgramAssocations
 
 // Config
-$edfiBaseUrl = "https://adviserods.nebraskacloud.org/api";
+$edfiBaseUrl = "https://sandbox.nebraskacloud.org/1920/api";
 
 
 
 // Check arguments
-if ($argc == 4)
+if ($argc == 3)
 {
   printf ("\nKey: %s", $argv[1]);
   printf ("\nSecret: %s", $argv[2]);
-  printf ("\nStudent State ID: %s\n\n", $argv[3]);
+  // printf ("\nStudent State ID: %s\n\n", $argv[3]);
 
   $adviserKey = $argv[1];
   $adviserSecret = $argv[2];
-  $studentId = $argv[3];
+  // $studentId = $argv[3];
 
-  $authCode = getAuthCode($adviserKey);
-  $authToken = getAuthToken($adviserKey, $adviserSecret, $authCode);
+  // $authCode = getAuthCode($adviserKey);
+  $authToken = getAuthToken($adviserKey, $adviserSecret);
 }
-else if ($argc == 3)
-{
-  $authToken = $argv[1];
-  $studentId = $argv[2];
-}
-else if ($argc == 2)
-{
-  printf("\nstrtotime: %s -> %d\n\n", $argv[1], strtotime($argv[1]));
-  exit();
-}
+// else if ($argc == 3)
+// {
+//   $authToken = $argv[1];
+//   $studentId = $argv[2];
+// }
+// else if ($argc == 2)
+// {
+//   printf("\nstrtotime: %s -> %d\n\n", $argv[1], strtotime($argv[1]));
+//   exit();
+// }
 else
 {
-  printf ("\nusage: <key> <secret> <studentId>\nOR: <auth token> <studentId>\n\n");
+  printf ("\nusage: <key> <secret>\n\n");
   exit();
 }
 
 // Get StudentSpecialEducationAssociations
 $authorization = "Authorization: Bearer " . $authToken;
 
-$url = $edfiBaseUrl . "/api/v2.0/2019/studentSpecialEducationProgramAssociations?studentUniqueId=" . $studentId;
+$url = $edfiBaseUrl . "/data/v3/ed-fi/students?offset=100&limit=100&totalCount=false";
 
 $curl = curl_init();
 
@@ -60,7 +63,13 @@ $rCode = curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
 
 curl_close($curl);
 printf("\nresult code: %s\nJSON result:\n", $rCode);
-var_dump($result);
+
+printf("\nStudents in Sandbox:\n\n");
+$arrResult = json_decode($result, true);
+foreach ($arrResult as $s)
+{
+  printf("%s\n", $s["studentUniqueId"]);
+}
 
 
 function getAuthCode($adviserKey)
@@ -68,7 +77,7 @@ function getAuthCode($adviserKey)
   // Get ODS authorization code
   global $edfiBaseUrl;
 
-  $edfiApiCodeUrl = "$edfiBaseUrl/oauth/authorize";
+  $edfiApiCodeUrl = "$edfiBaseUrl/oauth/authcode";
   $data = "Client_id=$adviserKey&Response_type=code";
   try
   {
@@ -97,13 +106,13 @@ function getAuthCode($adviserKey)
   }
 }
 
-function getAuthToken($adviserKey, $adviserSecret, $authCode)
+function getAuthToken($adviserKey, $adviserSecret)
 {
   // Get ODS access token
   global $edfiBaseUrl;
 
   $edfiApiTokenUrl = "$edfiBaseUrl/oauth/token";
-  $paramsToPost = "Client_id=$adviserKey&Client_secret=$adviserSecret&Code=$authCode&Grant_type=authorization_code";
+  $paramsToPost = "grant_type=client_credentials";
 
   try
   {
@@ -114,6 +123,7 @@ function getAuthToken($adviserKey, $adviserSecret, $authCode)
       curl_setopt($curl, CURLOPT_POST, 1);
       curl_setopt($curl, CURLOPT_POSTFIELDS, $paramsToPost);
       curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);
+      curl_setopt($curl, CURLOPT_USERPWD, $adviserKey . ":" . $adviserSecret);
 
       $result = curl_exec($curl);
       $rCode = curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
