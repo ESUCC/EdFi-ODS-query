@@ -1,4 +1,4 @@
-<?php
+$edfiRec-><?php
 //
 // publish-1920.php
 //
@@ -7,7 +7,7 @@
 //   data through SRS and then processing records needing to be published for
 //   each of those districts.
 //
-//  9/24/2019 SI
+//  9/30/2019 SI
 //
 
 // Config
@@ -18,6 +18,11 @@ $dbUser = "psql-primary";
 $dbName = "nebraska_srs";
 
 // persistent variables
+$adviserKey = null;
+$adviserSecret = null;
+$dbConn = null;
+$errorMessage = "";
+$errorRetryTime = 0;
 $logFile = null;
 
 // Object classes
@@ -30,6 +35,28 @@ class districtObj
   public $secret;
 }
 
+class edfi2Obj
+{
+  public $id_edfi2_entry;
+  public $EducationOrganizationId;
+  public $StudentUniqueId;
+  public $EdfiPublishTime;
+  public $EdfiPublishStatus;
+  public $EdfiErrorMessage;
+  public $ToTakeAlternateAssessment;
+  public $BeginDate;
+  public $Disability;
+  public $EndDate;
+  public $InitialSpecialEducationEntryDate;
+  public $PlacementType;
+  public $ReasonExited;
+  public $SchoolHoursPerWeek;
+  public $SpecialEducationProgramsService;
+  public $SpecialEducationHoursPerWeek;
+  public $SpecialEducationProgram;
+  public $SpecialEducationSetting;
+}
+
 // No command-line arguments required -- data comes from the SRS database
 
 date_default_timezone_set('America/Chicago');
@@ -38,22 +65,33 @@ printf("\n%s: INFO: publish-1920 starting up\n", date("Y-m-d H:i:s T"));
 while (true)
 {
   // Open log file
-  $logFile = openPublishLog();
+  openPublishLog();
 
   // Connect to DB
   $dbConn = pg_connect("dbname=" . $dbName . " host=" . $dbHost .
     " port=" . $dbPort . " user=" . $dbUser . " connect_timeout=5");
   if (!$dbConn)
   {
-    writePublishLog ($logFile, "ERROR: Database connection failed");
+    writePublishLog ("ERROR: Database connection failed");
   }
 
   if ($logFile && $dbConn)
   {
-    writePublishLog($logFile, "INFO: starting publishing cycle");
+    writePublishLog("INFO: starting publishing cycle");
+
+    // re-try publishing errors every hour -- see if it's time for that
+    if (time() > $errorRetryTime + 3600)
+    {
+      $publishErrors = true;
+      $errorRetryTime = time();
+    }
+    else
+    {
+      $publishErrors = false;
+    }
 
     // find districts which are enabled to use SRS ADVISER publishing
-    writePublishLog($logFile, "INFO: finding districts to publish");
+    writePublishLog("INFO: finding districts to publish");
     $districts = [];
     $districtCount = 0;
     $sql = "SELECT id_county, id_district, name_district, edfi_key, edfi_secret " .
@@ -80,55 +118,333 @@ while (true)
     }
     else
     {
-      writePublishLog($logFile, sprintf ("ERROR: A database error occurred: %s", pg_last_error($dbConn)));
+      writePublishLog(sprintf ("ERROR: A database error occurred: %s", pg_last_error($dbConn)));
     }
 
-    writePublishLog($logFile, sprintf("INFO: %d ADVISER districts found", $districtCount));
+    writePublishLog(sprintf("INFO: %d ADVISER districts found", $districtCount));
 
     // find records to publish for each district
     foreach ($districts as $d)
     {
-      
+      if (empty($d->key) || empty($d->secret))
+      {
+        // writePublishLog(sprintf ("ERROR: missing secret/key for %s (%s-%s)",
+        //  $d->name_district, $d->id_county, $d->id_district));
+      }
+      else
+      {
+        $adviserKey = $d->key;
+        $adviserSecret = $d->secret;
+
+        // retrieve list of students who need publishing in this district
+        $studentIds = getStudentsToPublish($d->id_county, $d->id_district,
+          $publishErrors);
+
+        if (count($studentIds) > 0)
+        {
+          writePublishLog(sprintf ("INFO: processing %d students for %s (%s-%s)",
+            count($studentIds), $d->name_district, $d->id_county, $d->id_district));
+        }
+
+        // publish records student by student ID
+        foreach ($studentIds as $sId)
+        {
+          // delete existing ADVISER SPED records for this student
+          deleteSPEDAssociations($sId);
+
+          // set the status so all of the student's ADVISER SPED records are republished
+          setStudentToRepublish($sId);
+
+          $edfiRecs = getEdfi2RecsForStudent($sId, $d->id_county,
+            $d->id_district, $publishErrors);
+
+          foreach ($edfiRecs as $edfiRec)
+          {
+            $rCode = 600;
+            $errorMessage = "";
+            if ($edfiRec->EdfiPublishStatus == 'W' || $edfiRec->EdfiPublishStatus == 'E')
+            {
+              // these types are waiting to be published
+              // tests for validity
+              $invalidList = testAdviserValues($edfiRec);
+
+              $json = "";
+              if(empty($invalidList))
+              {
+                // the record passed our basic validation, so try to publish it
+                // create JSON
+                $json = createSPEDJson($d->id_county, $d->id_district, $edfiRec);
+
+                // publish
+                $rCode = publishSPEDAssociation($json);
+                if ($rCode == 401)
+                {
+                  getAuthToken();
+                  $rCode = publishSPEDAssociation($json);
+                }
+              }
+              else
+              {
+                // the record failed our basic validation
+                $rCode = 601;
+                $errorMessage = sprintf("invalid fields: %s",
+                  implode(", ", $invalidList));
+              }
+
+              savePublishResult($edfiRec->id_edfi2_entry, $json, $rCode, $errorMessage);
+
+            }
+            else if ($edfiRec->EdfiPublishStatus == 'D')
+            {
+              // delete Edfi2 record
+              deleteEdfi2Rec($edfiRec->id_edfi2_entry);
+            }
+            else if ($edfiRec->EdfiPublishStatus == 'T')
+            {
+              // transfer record
+              writePublishLog(sprintf ("WARN: unsure how to process T record %d for student %d",
+                $edfiRec->id_edfi2_entry, $edfiRec->StudentUniqueId));
+            }
+            else
+            {
+              // unknown record type
+              writePublishLog(sprintf ("WARN: unsure how to process %s record %d for student %d",
+                $edfiRec->EdfiPublishStatus, $edfiRec->id_edfi2_entry,
+                $edfiRec->StudentUniqueId));
+            }
+          }
+        }
+        updateMissingUniqueIds($d->id_county, $d->id_district);
+      }
+      $authToken = null;
     }
   }
 
   // breathe before starting the cycle over again
-  writePublishLog($logFile, "INFO: finished publishing cycle");
-  closePublishLog($logFile);
+  writePublishLog("INFO: finished publishing cycle");
+  closePublishLog();
   sleep(60);
 }
 
-function closePublishLog($logFile)
+function buildJsonServices ($serviceCode)
 {
-  writePublishLog($logFile, "INFO: closing log file");
+  $json = '"specialEducationProgramServices": [';
+  if ($serviceCode == 1 || $serviceCode == 4 || $serviceCode == 6 || $serviceCode == 7)
+  {
+    // OT service
+    $json .= '
+    {
+      "specialEducationProgramServiceDescriptor": "uri://education.ne.gov/SpecialEducationProgramServiceDescriptor#1",
+      "primaryIndicator": true
+    },';
+  }
+  if ($serviceCode == 2 || $serviceCode == 5 || $serviceCode == 6 || $serviceCode == 7)
+  {
+    // PT service
+    $json .= '
+    {
+      "specialEducationProgramServiceDescriptor": "uri://education.ne.gov/SpecialEducationProgramServiceDescriptor#2",
+      "primaryIndicator": true
+    },';
+  }
+  if ($serviceCode == 3 || $serviceCode == 4 || $serviceCode == 5 || $serviceCode == 6)
+  {
+    // SLT service
+    $json .= '
+    {
+      "specialEducationProgramServiceDescriptor": "uri://education.ne.gov/SpecialEducationProgramServiceDescriptor#3",
+      "primaryIndicator": true
+    },';
+  }
+  $json .= '],';
+}
+
+function closePublishLog()
+{
+  global $logFile;
+  writePublishLog("INFO: closing log file");
   fclose($logFile);
 }
 
-function openPublishLog()
+function createSPEDJson($id_county, $id_district, $edfiRec)
 {
-  $logFile = fopen("publish-1920.log", "a");
-  if (!$logFile)
+  $alternateAssessment = 'false';
+  if ($edfiRec->ToTakeAlternateAssessment == 'yes')
   {
-    printf("\n%s: ERROR: Failed to open log file\n", date("Y-m-d H:i:s T"));
-    return (null);
+    $alternateAssessment = 'true';
   }
-  writePublishLog($logFile, "INFO: Log file opened");
-  return ($logFile);
+  if (substr($id_county,0,1) == "0")
+  {
+    $id_county = substr($id_county,1,1);
+  }
+  $json = '{
+    "educationOrganizationReference": {
+      "educationOrganizationId": ' . $id_county . $id_district . '000,
+    },
+    "programReference": {
+      "educationOrganizationId": ' . $id_county . $id_district . '000,
+      "programName": "Special Education",
+      "programTypeDescriptor": "uri://ed-fi.org/ProgramTypeDescriptor#Special Education",
+    },
+    "studentReference": {
+      "studentUniqueId": "' . $edfiRec->StudentUniqueId . '",
+    },
+    "beginDate": "' . $edfiRec->BeginDate . '",
+    "schoolHoursPerWeek": ' . $edfiRec->SchoolHoursPerWeek . ',
+    "specialEducationHoursPerWeek": ' . $edfiRec->SpecialEducationHoursPerWeek . ',
+    "specialEducationSettingDescriptor": "uri://education.ne.gov/SpecialEducationSettingDescriptor#' .
+      str_pad(trim($edfiRec->SpecialEducationSetting), 2, "0", STR_PAD_LEFT) . '",
+    "_ext": {
+      "ne": {
+        "placementTypeDescriptor": "uri://education.ne.gov/PlacementTypeDescriptor#' . $edfiRec->PlacementType .'",
+        "specialEducationProgramDescriptor": "uri://education.ne.gov/SpecialEducationProgramDescriptor#' . trim($edfiRec->SpecialEducationProgram) .'",
+        "toTakeAlternateAssessment": ' . $alternateAssessment . '
+      }
+    },
+    "disabilities": [
+      {
+        "disabilityDescriptor": "uri://education.ne.gov/DisabilityDescriptor#' . $edfiRec->Disability . '",
+        "orderOfDisability": 0,
+        "designations": []
+      }
+    ],';
+
+  if ($edfiRec->SpecialEducationProgramService > 0)
+  {
+    $json .= buildJsonServices($edfiRec->SpecialEducationProgramService);
+  }
+
+  if ($edfiRec->EndDate)
+  {
+    $json .= '
+      "endDate": ' . $edfiRec->EndDate . ',
+      "reasonExitedDescriptor": "uri://education.ne.gov/ReasonExitedDescriptor#' . $edfiRec->ReasonExited . '",
+    ';
+  }
+  $json .= ' }';
+
+  return ($json);
 }
 
-function writePublishLog($logFile, string $logEntry)
+function deleteEdfi2Rec($edfiRecId)
 {
-  printf("\n%s: %s", date("Y-m-d H:i:s T"), $logEntry);
-  if (!fwrite($logFile, sprintf("\n%s: %s", date("Y-m-d H:i:s T"), $logEntry)))
+  global $dbConn;
+
+  $sql = "DELETE FROM edfi2 WHERE id_edfi2_entry=" . $edfiRecId;
+
+  $dbResult = pg_query($dbConn, $sql);
+
+  if ($dbResult)
   {
-    printf("\n%s: ERROR: Failed writing to log file\n", date("Y-m-d H:i:s T"));
+    writePublishLog(sprintf("INFO: D record %d deleted", $edfiRecId));
+  }
+  {
+    writePublishLog(sprintf ("ERROR: A database error occurred: %s", pg_last_error($dbConn)));
   }
 }
 
+function deleteSPEDAssociations($studentId)
+{
+  global $authToken;
+  global $edfiBaseUrl;
 
-function getAuthToken($adviserKey, $adviserSecret)
+
+  if (empty($authToken))
+  {
+    getAuthToken();
+  }
+  if (!empty($authToken))
+  {
+    $authorization = "Authorization: Bearer " . $authToken;
+    // list studentSpecialEducationProgramAssociations
+    $url = $edfiBaseUrl . "/data/v3/ed-fi/studentSpecialEducationProgramAssociations?offset=0&limit=25&totalCount=false&studentUniqueId=" . $studentId;
+
+    $curl = curl_init();
+    curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($curl, CURLOPT_HTTPHEADER, array('Content-Type: application/json' , $authorization ));
+    curl_setopt($curl, CURLOPT_URL, "$url");
+    curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);
+
+    $result = curl_exec($curl);
+    $rCode = curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
+
+    if ($rCode == 401)
+    {
+      getAuthToken();
+    }
+    $arrResult = json_decode($result, true);
+    $spaIds = [];
+
+    if ($rCode == 200)
+    {
+      foreach ($arrResult as $s)
+      {
+        $spaIds[] = $s["id"];
+      }
+
+      curl_setopt($curl, CURLOPT_CUSTOMREQUEST, "DELETE");
+      foreach($spaIds as $spa)
+      {
+        $url = $edfiBaseUrl . "/data/v3/ed-fi/studentSpecialEducationProgramAssociations/" . $spa;
+        curl_setopt($curl, CURLOPT_URL, "$url");
+        $result = curl_exec($curl);
+        $errorMessage = json_decode($result)->message;
+        $rCode = curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
+        if ($rCode == 401)
+        {
+          getAuthToken();
+        }
+        if ($rCode == 204)
+        {
+          writePublishLog(sprintf("INFO: deleted SSPA %s", $spa));
+        }
+        else
+        {
+          writePublishLog(sprintf("WARN: problem deleting SSPA %s, return code: %d, %s",
+            $spa, $rCode, $errorMessage));
+        }
+      }
+    }
+    else
+    {
+      writePublishLog(sprintf("WARN: could not locate SSPA records for %d, response: %d, text: %s",
+        $studentId, $rCode, $result));
+    }
+    curl_close($curl);
+  }
+}
+
+function fillEdfi2Obj($dbRow)
+{
+  $edfiRec = new edfi2Obj();
+  $edfiRec->id_edfi2_entry = $dbRow[4];
+  $edfiRec->EducationOrganizationId = $dbRow[5];
+  $edfiRec->StudentUniqueId = $dbRow[6];
+  $edfiRec->EdfiPublishTime = $dbRow[7];
+  $edfiRec->EdfiPublishStatus = $dbRow[8];
+  $edfiRec->EdfiErrorMessage = $dbRow[9];
+  $edfiRec->ToTakeAlternateAssessment = $dbRow[22];
+  $edfiRec->BeginDate = $dbRow[23];
+  $edfiRec->Disability = $dbRow[24];
+  $edfiRec->EndDate = $dbRow[25];
+  $edfiRec->InitialSpecialEducationEntryDate = $dbRow[26];
+  $edfiRec->PlacementType = $dbRow[27];
+  $edfiRec->ReasonExited = $dbRow[28];
+  $edfiRec->SchoolHoursPerWeek = $dbRow[29];
+  $edfiRec->SpecialEducationProgramService = $dbRow[30];
+  $edfiRec->SpecialEducationHoursPerWeek = $dbRow[31];
+  $edfiRec->SpecialEducationProgram = $dbRow[32];
+  $edfiRec->SpecialEducationSetting = $dbRow[33];
+
+  return ($edfiRec);
+}
+
+function getAuthToken()
 {
   // Get ODS access token
+  global $adviserKey;
+  global $adviserSecret;
+  global $authToken;
   global $edfiBaseUrl;
 
   $edfiApiTokenUrl = "$edfiBaseUrl/oauth/token";
@@ -137,7 +453,6 @@ function getAuthToken($adviserKey, $adviserSecret)
   try
   {
       $curl = curl_init();
-
       curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, false);
       curl_setopt($curl, CURLOPT_URL, "$edfiApiTokenUrl");
       curl_setopt($curl, CURLOPT_POST, 1);
@@ -148,51 +463,277 @@ function getAuthToken($adviserKey, $adviserSecret)
       $result = curl_exec($curl);
       $rCode = curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
       $jsonResult = json_decode($result);
-      curl_close($curl);
       $authToken=$jsonResult->access_token;
-      printf ("\nresult code: %s", $rCode);
-      printf ("\nAccess token: %s\n", $authToken);
+      if (empty($authToken))
+      {
+        writePublishLog(sprintf("ERROR: failed to get auth token, return code %d", $rCode));
+      }
+      curl_close($curl);
       return ($authToken);
-
   }
   catch(Exception $e) {
-      printf ("\nError getting auth token: %s", $e->getMessage());
-      exit();
+      writePublishLog(sprintf("ERROR: failed to get auth token: %s", $e->getMessage()));
+      return (null);
   }
 }
 
-function getGradeDescriptor ($grade)
+function getEdfi2RecsForStudent($studentId, $idCounty, $idDistrict, $publishErrors)
 {
-  // build GradeLevelDescriptor from our grade string
-  // translate special cases
-  if (preg_match('/^[1-9]$/', $grade))
-  {
-    return "uri://education.ne.gov/GradeLevelDescriptor#0" . $grade;
-  }
-  if ($grade == '12+')
-  {
-    return "uri://education.ne.gov/GradeLevelDescriptor#12";
-  }
-  if ($grade == 'K')
-  {
-    return "uri://education.ne.gov/GradeLevelDescriptor#KG";
-  }
-  if ($grade == 'ECSE' || $grade == 'EI 0-2')
-  {
-    return "uri://education.ne.gov/GradeLevelDescriptor#HP";
-  }
-  // all others just
-  return "uri://education.ne.gov/GradeLevelDescriptor#" . $grade;
-}
+  global $dbConn;
 
-function schoolIdToInt ($stringSchoolId)
-{
-  if (strlen($stringSchoolId) == 9 && substr($stringSchoolId,0,1) == '0')
+  if ($publishErrors)
   {
-    return (substr($stringSchoolId,1,8));
+    $statuses = "('D', 'E', 'W', 'T')";
   }
   else
   {
-    return ($stringSchoolId);
+    $statuses = "('D', 'W', 'T')";
+  }
+
+  // get all edfi2 records for this student
+  $sql = "SELECT * " .
+    "FROM edfi2 " .
+    "WHERE id_county = '" . $idCounty . "' AND " .
+    "id_district = '" . $idDistrict . "' AND " .
+    "\"EdfiPublishStatus\" IN " . $statuses . " AND " .
+    "\"StudentUniqueId\" = " . $studentId . " " .
+    "ORDER BY \"BeginDate\"";
+
+  $dbResult = pg_query($dbConn, $sql);
+
+  $edfiRecs = [];
+  if ($dbResult)
+  {
+    while ($dbRow = pg_fetch_row($dbResult))
+    {
+      // retrieve record
+      $edfiRecs[] = fillEdfi2Obj($dbRow);
+    }
+  }
+  else
+  {
+    writePublishLog(sprintf ("ERROR: A database error occurred: %s", pg_last_error($dbConn)));
+  }
+  return ($edfiRecs);
+}
+
+function getStudentsToPublish($idCounty, $idDistrict, $publishErrors)
+{
+  global $dbConn;
+
+  if ($publishErrors)
+  {
+    $statuses = "('D', 'E', 'W', 'T')";
+  }
+  else
+  {
+    $statuses = "('D', 'W', 'T')";
+  }
+
+  $studentIds = [];
+  $sql = "SELECT DISTINCT \"StudentUniqueId\" " .
+    "FROM edfi2 " .
+    "WHERE id_county = '" . $idCounty . "' AND " .
+    "id_district = '" . $idDistrict . "' AND " .
+    "\"EdfiPublishStatus\" IN " . $statuses . " AND " .
+    "\"StudentUniqueId\" > 0 " .
+    "ORDER BY \"StudentUniqueId\"";
+
+  $dbResult = pg_query($dbConn, $sql);
+
+  if ($dbResult)
+  {
+    while ($dbRow = pg_fetch_row($dbResult))
+    {
+      $studentIds[] = $dbRow[0];
+    }
+  }
+  else
+  {
+    writePublishLog(sprintf ("ERROR: A database error occurred: %s", pg_last_error($dbConn)));
+  }
+  return($studentIds);
+}
+
+function openPublishLog()
+{
+  global $logFile;
+  $logFile = fopen("logs/publish-1920.log", "a");
+  if (!$logFile)
+  {
+    printf("\n%s: ERROR: Failed to open log file\n", date("Y-m-d H:i:s T"));
+  }
+  writePublishLog("INFO: Log file opened");
+}
+
+function publishSPEDAssociation($data)
+{
+  global $authToken;
+  global $edfiBaseUrl;
+  global $errorMessage;
+
+  $authorization = "Authorization: Bearer " . $authToken;
+  $url = $edfiBaseUrl . "/data/v3/ed-fi/studentSpecialEducationProgramAssociations";
+  $curl = curl_init();
+  curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, false);
+  curl_setopt($curl, CURLOPT_URL, "$url");
+  curl_setopt($curl, CURLOPT_CUSTOMREQUEST, "POST");
+  curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);
+  $payloadLength = 'Content-Length: ' . strlen($data);
+  curl_setopt($curl, CURLOPT_HTTPHEADER, array('Content-Type: application/json' ,
+    $authorization, $payloadLength ));
+  curl_setopt($curl, CURLOPT_URL, "$url");
+  curl_setopt($curl, CURLOPT_POSTFIELDS, $data);
+
+  $result = curl_exec($curl);
+  $errorMessage = json_decode($result)->message;
+  $rCode = curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
+  curl_close($curl);
+  return($rCode);
+}
+
+function savePublishResult($edfiRecId, $json, $rCode, $errorMessage)
+{
+  global $dbConn;
+
+  $publishStatus = "W";
+  if ($rCode == 200 || $rCode == 201 || $rCode == 204)
+  {
+    $publishStatus = "S";
+    writePublishLog(sprintf("INFO: rec %d published: %s", $edfiRecId, $json));
+  }
+  else
+  {
+    $publishStatus = "E";
+    writePublishLog(sprintf("WARN: rec %d failed to publish: %d, %s",
+      $edfiRecId, $rCode, $errorMessage));
+  }
+
+  $sql = "UPDATE edfi2 SET \"EdfiPublishStatus\"= '" . $publishStatus .
+    "', \"EdfiPublishTime\"= NOW(), \"EdfiErrorMessage\"= '" .
+    $rCode . ": " . addslashes($errorMessage) . "' WHERE id_edfi2_entry=" .
+    $edfiRecId;
+
+  $dbResult = pg_query($dbConn, $sql);
+
+  if (!$dbResult)
+  {
+    writePublishLog(sprintf ("ERROR: A database error occurred: %s", pg_last_error($dbConn)));
+  }
+}
+
+function setStudentToRepublish ($studentId)
+{
+  global $dbConn;
+
+  $sql = "UPDATE edfi2 SET \"EdfiPublishStatus\"= 'W' " .
+    "WHERE \"StudentUniqueId\" = " . $studentId . " " .
+    "AND \"EdfiPublishStatus\"='S' ";
+
+  $dbResult = pg_query($dbConn, $sql);
+
+  if (!$dbResult)
+  {
+    writePublishLog(sprintf ("ERROR: A database error occurred: %s", pg_last_error($dbConn)));
+  }
+}
+
+function testAdviserValues($edfiRec)
+{
+  $invalidList = [];
+
+  if ($edfiRec->StudentUniqueId < 1)
+  {
+    $invalidList[] = "StudentUniqueId";
+  }
+
+  $beginTimestamp = strtotime($edfiRec->BeginDate);
+  if ( $beginTimestamp < strtotime('2019-07-01') ||
+    $beginTimestamp > strtotime('2020-06-30'))
+  {
+    $invalidList[] = "BeginDate";
+  }
+
+  if (!empty($edfiRec->EndDate))
+  {
+    $endTimestamp = strtotime($edfiRec->EndDate);
+    if ( $endTimestamp < strtotime('2019-07-01') ||
+      $endTimestamp > strtotime('2020-06-30') ||
+      $endTimestamp < $beginTimestamp)
+    {
+      $invalidList[] = "EndDate";
+    }
+    if (empty($edfiRec->ReasonExited))
+    {
+      $invalidList[] = "ReasonExited";
+    }
+  }
+
+  if (empty($edfiRec->SchoolHoursPerWeek))
+  {
+    $invalidList[] = "SchoolHoursPerWeek";
+  }
+
+  if (is_null($edfiRec->SpecialEducationHoursPerWeek))
+  {
+    $invalidList[] = "SpecialEducationHoursPerWeek";
+  }
+
+  if (empty($edfiRec->SpecialEducationSetting))
+  {
+    $invalidList[] = "SpecialEducationSetting";
+  }
+
+  if (($edfiRec->PlacementType == 0) ||
+    ($edfiRec->PlacementType >= 2 && $edfiRec->PlacementType <= 4))
+  {
+    // valid
+  }
+  else
+  {
+    $invalidList[] = "PlacementType";
+  }
+
+  if (empty($edfiRec->SpecialEducationProgram))
+  {
+    $invalidList[] = "SpecialEducationProgram";
+  }
+
+  if (empty($edfiRec->Disability))
+  {
+    $invalidList[] = "Disability";
+  }
+
+  return($invalidList);
+}
+
+function updateMissingUniqueIds($idCounty, $idDistrict)
+{
+  global $dbConn;
+
+  $sql = "UPDATE edfi2 SET \"EdfiPublishStatus\"= 'E', \"EdfiPublishTime\"= NOW(), " .
+    "\"EdfiErrorMessage\"= '602: StudentUniqueId is missing' " .
+    "WHERE id_county='" . $idCounty . "' " .
+    "AND id_district='" . $idDistrict . "' " .
+    "AND (\"StudentUniqueId\" IS NULL OR \"StudentUniqueId\"< 1)";
+
+  $dbResult = pg_query($dbConn, $sql);
+
+  if (!$dbResult)
+  {
+    writePublishLog(sprintf ("ERROR: A database error occurred in updateMissingUniqueIds: %s",
+      pg_last_error($dbConn)));
+  }
+
+}
+
+function writePublishLog(string $logEntry)
+{
+  global $logFile;
+
+  printf("\n%s: %s", date("Y-m-d H:i:s T"), $logEntry);
+  if (!fwrite($logFile, sprintf("\n%s: %s", date("Y-m-d H:i:s T"), $logEntry)))
+  {
+    printf("\n%s: ERROR: Failed writing to log file\n", date("Y-m-d H:i:s T"));
   }
 }
