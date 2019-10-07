@@ -1,0 +1,8 @@
+version: "3"
+
+services:
+  publish:
+    build: .
+    container_name: publish-1920
+    volumes:
+      - ./logs:/usr/src/adviser-publish/logs
