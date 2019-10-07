@@ -7,15 +7,11 @@ $edfiRec-><?php
 //   data through SRS and then processing records needing to be published for
 //   each of those districts.
 //
-//  9/30/2019 SI
+//  9/25 - 10/7/2019 SI
 //
 
 // Config
-$edfiBaseUrl = "https://sandbox.nebraskacloud.org/1920/api";
-$dbHost = "172.16.3.38";
-$dbPort = 5434;
-$dbUser = "psql-primary";
-$dbName = "nebraska_srs";
+include 'publish-config.php';
 
 // persistent variables
 $adviserKey = null;
@@ -158,8 +154,11 @@ while (true)
           $edfiRecs = getEdfi2RecsForStudent($sId, $d->id_county,
             $d->id_district, $publishErrors);
 
+          $prevRecEnd = 1;
+          $sRecCount = 0;
           foreach ($edfiRecs as $edfiRec)
           {
+            $sRecCount++;
             $rCode = 600;
             $errorMessage = "";
             if ($edfiRec->EdfiPublishStatus == 'W' || $edfiRec->EdfiPublishStatus == 'E')
@@ -171,16 +170,28 @@ while (true)
               $json = "";
               if(empty($invalidList))
               {
-                // the record passed our basic validation, so try to publish it
-                // create JSON
-                $json = createSPEDJson($d->id_county, $d->id_district, $edfiRec);
-
-                // publish
-                $rCode = publishSPEDAssociation($json);
-                if ($rCode == 401)
+                // check for overlapping dates on records
+                if (($prevRecEnd == 0) || (strtotime($edfiRec->BeginDate) <= $prevRecEnd))
                 {
-                  getAuthToken();
+                  // Either we're trying to publish a second record when the first
+                  //  one hasn't ended, or the begin date on this record is earlier
+                  //  than the end date on the previous record
+                  $rCode = 603;
+                  $errorMessage = "The BeginDate overlaps with another record for this student";
+                }
+                else
+                {
+                  // the record passed our basic validation, so try to publish it
+                  // create JSON
+                  $json = createSPEDJson($d->id_county, $d->id_district, $edfiRec);
+
+                  // publish
                   $rCode = publishSPEDAssociation($json);
+                  if ($rCode == 401)
+                  {
+                    getAuthToken();
+                    $rCode = publishSPEDAssociation($json);
+                  }
                 }
               }
               else
@@ -192,7 +203,14 @@ while (true)
               }
 
               savePublishResult($edfiRec->id_edfi2_entry, $json, $rCode, $errorMessage);
-
+              if (!$edfiRec->EndDate)
+              {
+                $prevRecEnd = 0;
+              }
+              else
+              {
+                $prevRecEnd = strtotime($edfiRec->EndDate);
+              }
             }
             else if ($edfiRec->EdfiPublishStatus == 'D')
             {
@@ -221,6 +239,7 @@ while (true)
   }
 
   // breathe before starting the cycle over again
+  pg_close($dbConn);
   writePublishLog("INFO: finished publishing cycle");
   closePublishLog();
   sleep(60);
@@ -257,6 +276,7 @@ function buildJsonServices ($serviceCode)
     },';
   }
   $json .= '],';
+  return ($json);
 }
 
 function closePublishLog()
@@ -298,6 +318,7 @@ function createSPEDJson($id_county, $id_district, $edfiRec)
       "ne": {
         "placementTypeDescriptor": "uri://education.ne.gov/PlacementTypeDescriptor#' . $edfiRec->PlacementType .'",
         "specialEducationProgramDescriptor": "uri://education.ne.gov/SpecialEducationProgramDescriptor#' . trim($edfiRec->SpecialEducationProgram) .'",
+        "initialSpecialEducationEntryDate": "' . $edfiRec->InitialSpecialEducationEntryDate . '",
         "toTakeAlternateAssessment": ' . $alternateAssessment . '
       }
     },
@@ -317,7 +338,7 @@ function createSPEDJson($id_county, $id_district, $edfiRec)
   if ($edfiRec->EndDate)
   {
     $json .= '
-      "endDate": ' . $edfiRec->EndDate . ',
+      "endDate": "' . $edfiRec->EndDate . '",
       "reasonExitedDescriptor": "uri://education.ne.gov/ReasonExitedDescriptor#' . $edfiRec->ReasonExited . '",
     ';
   }
@@ -330,16 +351,18 @@ function deleteEdfi2Rec($edfiRecId)
 {
   global $dbConn;
 
-  $sql = "DELETE FROM edfi2 WHERE id_edfi2_entry=" . $edfiRecId;
-
-  $dbResult = pg_query($dbConn, $sql);
+  $dbResult = pg_delete ($dbConn, 'edfi2', ['id_edfi2_entry' => $edfiRecId]);
+  // $sql = "DELETE FROM edfi2 WHERE id_edfi2_entry=" . $edfiRecId;
+  //
+  // $dbResult = pg_query($dbConn, $sql);
 
   if ($dbResult)
   {
     writePublishLog(sprintf("INFO: D record %d deleted", $edfiRecId));
   }
+  else
   {
-    writePublishLog(sprintf ("ERROR: A database error occurred: %s", pg_last_error($dbConn)));
+    writePublishLog(sprintf ("INFO: D record %d was not found/deleted", $edfiRecId));
   }
 }
 
@@ -347,6 +370,7 @@ function deleteSPEDAssociations($studentId)
 {
   global $authToken;
   global $edfiBaseUrl;
+  global $edfiApiPath;
 
 
   if (empty($authToken))
@@ -357,7 +381,7 @@ function deleteSPEDAssociations($studentId)
   {
     $authorization = "Authorization: Bearer " . $authToken;
     // list studentSpecialEducationProgramAssociations
-    $url = $edfiBaseUrl . "/data/v3/ed-fi/studentSpecialEducationProgramAssociations?offset=0&limit=25&totalCount=false&studentUniqueId=" . $studentId;
+    $url = $edfiBaseUrl . $edfiApiPath . "/studentSpecialEducationProgramAssociations?offset=0&limit=25&totalCount=false&studentUniqueId=" . $studentId;
 
     $curl = curl_init();
     curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, false);
@@ -385,7 +409,7 @@ function deleteSPEDAssociations($studentId)
       curl_setopt($curl, CURLOPT_CUSTOMREQUEST, "DELETE");
       foreach($spaIds as $spa)
       {
-        $url = $edfiBaseUrl . "/data/v3/ed-fi/studentSpecialEducationProgramAssociations/" . $spa;
+        $url = $edfiBaseUrl . $edfiApiPath . "/studentSpecialEducationProgramAssociations/" . $spa;
         curl_setopt($curl, CURLOPT_URL, "$url");
         $result = curl_exec($curl);
         $errorMessage = json_decode($result)->message;
@@ -446,8 +470,9 @@ function getAuthToken()
   global $adviserSecret;
   global $authToken;
   global $edfiBaseUrl;
+  global $edfiAuthPath;
 
-  $edfiApiTokenUrl = "$edfiBaseUrl/oauth/token";
+  $edfiApiTokenUrl = "$edfiBaseUrl$edfiAuthPath/oauth/token";
   $paramsToPost = "grant_type=client_credentials";
 
   try
@@ -570,10 +595,11 @@ function publishSPEDAssociation($data)
 {
   global $authToken;
   global $edfiBaseUrl;
+  global $edfiApiPath;
   global $errorMessage;
 
   $authorization = "Authorization: Bearer " . $authToken;
-  $url = $edfiBaseUrl . "/data/v3/ed-fi/studentSpecialEducationProgramAssociations";
+  $url = $edfiBaseUrl . $edfiApiPath . "/studentSpecialEducationProgramAssociations";
   $curl = curl_init();
   curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, false);
   curl_setopt($curl, CURLOPT_URL, "$url");
@@ -715,6 +741,7 @@ function updateMissingUniqueIds($idCounty, $idDistrict)
     "\"EdfiErrorMessage\"= '602: StudentUniqueId is missing' " .
     "WHERE id_county='" . $idCounty . "' " .
     "AND id_district='" . $idDistrict . "' " .
+    "AND \"EdfiPublishStatus\" = 'W' " .
     "AND (\"StudentUniqueId\" IS NULL OR \"StudentUniqueId\"< 1)";
 
   $dbResult = pg_query($dbConn, $sql);
@@ -724,6 +751,14 @@ function updateMissingUniqueIds($idCounty, $idDistrict)
     writePublishLog(sprintf ("ERROR: A database error occurred in updateMissingUniqueIds: %s",
       pg_last_error($dbConn)));
   }
+
+  $sql = "DELETE FROM edfi2 " .
+    "WHERE id_county='" . $idCounty . "' " .
+    "AND id_district='" . $idDistrict . "' " .
+    "AND \"EdfiPublishStatus\" = 'D' " .
+    "AND (\"StudentUniqueId\" IS NULL OR \"StudentUniqueId\"< 1)";
+
+  pg_query($dbConn, $sql);
 
 }
 
