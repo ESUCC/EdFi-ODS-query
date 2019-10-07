@@ -117,7 +117,7 @@ while (true)
       writePublishLog(sprintf ("ERROR: A database error occurred: %s", pg_last_error($dbConn)));
     }
 
-    writePublishLog(sprintf("INFO: %d ADVISER districts found", $districtCount));
+    writePublishLog(sprintf("INFO: %d ADVISER district(s) found", $districtCount));
 
     // find records to publish for each district
     foreach ($districts as $d)
