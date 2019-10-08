@@ -335,7 +335,7 @@ function createSPEDJson($id_county, $id_district, $edfiRec)
     $json .= buildJsonServices($edfiRec->SpecialEducationProgramService);
   }
 
-  if ($edfiRec->EndDate)
+  if (!empty($edfiRec->EndDate))
   {
     $json .= '
       "endDate": "' . $edfiRec->EndDate . '",
