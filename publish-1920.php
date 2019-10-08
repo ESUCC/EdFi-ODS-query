@@ -138,7 +138,7 @@ while (true)
 
         if (count($studentIds) > 0)
         {
-          writePublishLog(sprintf ("INFO: processing %d students for %s (%s-%s)",
+          writePublishLog(sprintf ("INFO: processing %d student(s) for %s (%s-%s)",
             count($studentIds), $d->name_district, $d->id_county, $d->id_district));
         }
 
@@ -633,6 +633,11 @@ function savePublishResult($edfiRecId, $json, $rCode, $errorMessage)
     $publishStatus = "E";
     writePublishLog(sprintf("WARN: rec %d failed to publish: %d, %s",
       $edfiRecId, $rCode, $errorMessage));
+  }
+
+  if ($rCode == 403)
+  {
+    $errorMessage = "This student is not assocated with your district yet. Publish this student from your SIS.";
   }
 
   $sql = "UPDATE edfi2 SET \"EdfiPublishStatus\"= '" . $publishStatus .
