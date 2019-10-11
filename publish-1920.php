@@ -288,6 +288,17 @@ function closePublishLog()
 
 function createSPEDJson($id_county, $id_district, $edfiRec)
 {
+
+  if ($id_county == '87' && $id_district == '0561')
+  {
+    // 10/11/19 SI -- hack for Emerson-Hubbard, who seems to have changed counties.
+    // SRS has them as 87-0561, but the list from NDE shows 26-0561
+    // I'm going to catch and change that here, as the JSON is generated.
+    // Our plan for after reporting is to create a new district in SRS
+    // with the correct county ID and transfer all the students and staff
+    // privileges to the new one.
+    $id_county = '26';
+  }
   $alternateAssessment = 'false';
   if ($edfiRec->ToTakeAlternateAssessment == 'yes')
   {
@@ -637,7 +648,7 @@ function savePublishResult($edfiRecId, $json, $rCode, $errorMessage)
 
   if ($rCode == 403)
   {
-    $errorMessage = "This student is not assocated with your district yet. Publish this student from your SIS.";
+    $errorMessage = "This student is not associated with your district yet. Publish this student from your SIS.";
   }
 
   $sql = "UPDATE edfi2 SET \"EdfiPublishStatus\"= '" . $publishStatus .
