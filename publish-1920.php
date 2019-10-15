@@ -1,4 +1,4 @@
-$edfiRec-><?php
+<?php
 //
 // publish-1920.php
 //
@@ -149,7 +149,7 @@ while (true)
           deleteSPEDAssociations($sId);
 
           // set the status so all of the student's ADVISER SPED records are republished
-          setStudentToRepublish($sId);
+          setStudentToRepublish($sId, $d->id_county, $d->id_district);
 
           $edfiRecs = getEdfi2RecsForStudent($sId, $d->id_county,
             $d->id_district, $publishErrors);
@@ -664,12 +664,14 @@ function savePublishResult($edfiRecId, $json, $rCode, $errorMessage)
   }
 }
 
-function setStudentToRepublish ($studentId)
+function setStudentToRepublish ($studentId, $idCounty, $idDistrict)
 {
   global $dbConn;
 
   $sql = "UPDATE edfi2 SET \"EdfiPublishStatus\"= 'W' " .
     "WHERE \"StudentUniqueId\" = " . $studentId . " " .
+    "AND id_county = '$idCounty' " .
+    "AND id_district = '$idDistrict' " .
     "AND \"EdfiPublishStatus\"='S' ";
 
   $dbResult = pg_query($dbConn, $sql);
