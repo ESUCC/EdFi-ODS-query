@@ -1,4 +1,7 @@
+docker-compose.yml
+Dockerfile
 logs/
 publish-config.php
+publish-1819-config.php
 tmp/
 transfer-config.php
