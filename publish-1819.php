@@ -399,7 +399,14 @@ function deleteSPEDAssociations($studentId)
     {
       foreach ($arrResult as $s)
       {
-        $spaIds[] = $s["id"];
+        if ($studentId == $s["studentReference"]["studentUniqueId"])
+        {
+          // the 18-19 ODS has a bug where if we ask for records which don't exist,
+          // it will return an undefined set of records. So we can't rely on the
+          // actually matching the search criteria and need this test to make sure
+          // we only delete SSPA records for the student we asked for.
+          $spaIds[] = $s["id"];
+        }
       }
 
       curl_setopt($curl, CURLOPT_CUSTOMREQUEST, "DELETE");
