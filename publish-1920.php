@@ -532,7 +532,8 @@ function getEdfi2RecsForStudent($studentId, $idCounty, $idDistrict, $publishErro
     "WHERE id_county = '" . $idCounty . "' AND " .
     "id_district = '" . $idDistrict . "' AND " .
     "\"EdfiPublishStatus\" IN " . $statuses . " AND " .
-    "\"StudentUniqueId\" = " . $studentId . " " .
+    "\"StudentUniqueId\" = " . $studentId . " AND " .
+    "edfi_year = 1920 " .
     "ORDER BY \"BeginDate\"";
 
   $dbResult = pg_query($dbConn, $sql);
@@ -572,7 +573,8 @@ function getStudentsToPublish($idCounty, $idDistrict, $publishErrors)
     "WHERE id_county = '" . $idCounty . "' AND " .
     "id_district = '" . $idDistrict . "' AND " .
     "\"EdfiPublishStatus\" IN " . $statuses . " AND " .
-    "\"StudentUniqueId\" > 0 " .
+    "\"StudentUniqueId\" > 0 AND " .
+    "edfi_year = 1920 " .
     "ORDER BY \"StudentUniqueId\"";
 
   $dbResult = pg_query($dbConn, $sql);
@@ -672,6 +674,7 @@ function setStudentToRepublish ($studentId, $idCounty, $idDistrict)
     "WHERE \"StudentUniqueId\" = " . $studentId . " " .
     "AND id_county = '$idCounty' " .
     "AND id_district = '$idDistrict' " .
+    "AND edfi_year = 1920 " . 
     "AND \"EdfiPublishStatus\"='S' ";
 
   $dbResult = pg_query($dbConn, $sql);
@@ -760,6 +763,7 @@ function updateMissingUniqueIds($idCounty, $idDistrict)
     "WHERE id_county='" . $idCounty . "' " .
     "AND id_district='" . $idDistrict . "' " .
     "AND \"EdfiPublishStatus\" = 'W' " .
+    "AND edfi_year = 1920 " .
     "AND (\"StudentUniqueId\" IS NULL OR \"StudentUniqueId\"< 1)";
 
   $dbResult = pg_query($dbConn, $sql);
@@ -774,6 +778,7 @@ function updateMissingUniqueIds($idCounty, $idDistrict)
     "WHERE id_county='" . $idCounty . "' " .
     "AND id_district='" . $idDistrict . "' " .
     "AND \"EdfiPublishStatus\" = 'D' " .
+    "AND edfi_year = 1920 " .
     "AND (\"StudentUniqueId\" IS NULL OR \"StudentUniqueId\"< 1)";
 
   pg_query($dbConn, $sql);
