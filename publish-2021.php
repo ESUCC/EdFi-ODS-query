@@ -725,16 +725,6 @@ function testAdviserValues($edfiRec)
     }
   }
 
-  if (empty($edfiRec->SchoolHoursPerWeek))
-  {
-    $invalidList[] = "SchoolHoursPerWeek";
-  }
-
-  if (is_null($edfiRec->SpecialEducationHoursPerWeek))
-  {
-    $invalidList[] = "SpecialEducationHoursPerWeek";
-  }
-
   if (empty($edfiRec->SpecialEducationSetting))
   {
     $invalidList[] = "SpecialEducationSetting";
