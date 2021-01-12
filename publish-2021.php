@@ -683,7 +683,7 @@ function setStudentToRepublish ($studentId, $idCounty, $idDistrict)
     "WHERE \"StudentUniqueId\" = " . $studentId . " " .
     "AND id_county = '$idCounty' " .
     "AND id_district = '$idDistrict' " .
-    "AND edfi_year = 1920 " .
+    "AND edfi_year = 2021 " .
     "AND \"EdfiPublishStatus\"='S' ";
 
   $dbResult = pg_query($dbConn, $sql);
